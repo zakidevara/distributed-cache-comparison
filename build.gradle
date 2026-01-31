@@ -45,6 +45,14 @@ dependencies {
     implementation 'org.apache.kafka:kafka-streams:3.7.0'
     implementation 'org.springframework.kafka:spring-kafka:3.2.0'
     
+    // Hazelcast for Near-Cache support
+    implementation 'com.hazelcast:hazelcast:5.4.0'
+    implementation 'com.hazelcast:hazelcast-spring:5.4.0'
+    
+    // Redis for client-side caching support
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'io.lettuce:lettuce-core:6.3.0.RELEASE'
+    
     // Jackson for JSON serialization
     implementation 'com.fasterxml.jackson.core:jackson-databind'
 }

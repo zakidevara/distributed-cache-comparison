@@ -1,0 +1,47 @@
+version: '3.8'
+
+# Docker Compose for Redis with client-side caching support
+# Redis 7.0+ supports the TRACKING feature for client-side caching
+
+services:
+  redis:
+    image: redis:7.2-alpine
+    container_name: hollow-redis
+    ports:
+      - "6379:6379"
+    command: >
+      redis-server 
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - hollow-network
+
+  # Redis Commander - Web UI for Redis
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: hollow-redis-ui
+    ports:
+      - "8081:8081"
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    networks:
+      - hollow-network
+
+volumes:
+  redis-data:
+    driver: local
+
+networks:
+  hollow-network:
+    driver: bridge

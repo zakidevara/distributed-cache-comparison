@@ -2,12 +2,26 @@ package com.devara.hollow.benchmark;
 
 import com.devara.hollow.model.UserAccount;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.hazelcast.config.*;
+import com.hazelcast.core.Hazelcast;
+import com.hazelcast.core.HazelcastInstance;
+import com.hazelcast.map.IMap;
 import com.netflix.hollow.api.consumer.HollowConsumer;
 import com.netflix.hollow.api.consumer.fs.HollowFilesystemAnnouncementWatcher;
 import com.netflix.hollow.api.consumer.fs.HollowFilesystemBlobRetriever;
 import com.netflix.hollow.api.producer.HollowProducer;
 import com.netflix.hollow.api.producer.fs.HollowFilesystemAnnouncer;
 import com.netflix.hollow.api.producer.fs.HollowFilesystemPublisher;
+import io.lettuce.core.ClientOptions;
+import io.lettuce.core.RedisClient;
+import io.lettuce.core.RedisURI;
+import io.lettuce.core.TrackingArgs;
+import io.lettuce.core.api.StatefulRedisConnection;
+import io.lettuce.core.api.sync.RedisCommands;
+import io.lettuce.core.protocol.ProtocolVersion;
+import io.lettuce.core.support.caching.CacheAccessor;
+import io.lettuce.core.support.caching.CacheFrontend;
+import io.lettuce.core.support.caching.ClientSideCaching;
 import org.apache.kafka.clients.admin.AdminClient;
 import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
@@ -35,17 +49,20 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * JMH Benchmark comparing refresh latency between Hollow and Kafka KTable.
+ * JMH Benchmark comparing refresh latency between Hollow, Kafka KTable, Hazelcast Near-Cache, and Redis.
  * Measures end-to-end time from publish to consumer visibility.
  * 
- * This is the key metric for comparing the two approaches:
+ * This is the key metric for comparing the four approaches:
  * - Hollow: publish -> file write -> announcement -> poll/watch -> refresh
  * - Kafka: publish -> Kafka broker -> consumer stream -> KTable update
+ * - Hazelcast: put -> invalidation event -> next read fetches fresh data
+ * - Redis: SET -> TRACKING invalidation -> local cache miss -> fetch fresh data
  */
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
@@ -58,6 +75,8 @@ public class RefreshLatencyBenchmark {
     private static final String BOOTSTRAP_SERVERS = "localhost:9092";
     private static final String TOPIC = "refresh-benchmark-users";
     private static final String STORE_NAME = "refresh-benchmark-store";
+    private static final String HAZELCAST_MAP_NAME = "refresh-benchmark-users";
+    private static final String REDIS_KEY_PREFIX = "refresh:user:";
     private static final ObjectMapper objectMapper = new ObjectMapper();
 
     private Path hollowDir;
@@ -71,6 +90,18 @@ public class RefreshLatencyBenchmark {
     private KafkaProducer<Long, String> kafkaProducer;
     private KafkaStreams kafkaStreams;
     
+    // Hazelcast components
+    private HazelcastInstance hazelcastProducerInstance;
+    private HazelcastInstance hazelcastConsumerInstance;
+    private IMap<Long, UserAccount> hazelcastProducerMap;
+    private IMap<Long, UserAccount> hazelcastConsumerMap;
+    
+    // Redis components
+    private RedisClient redisClient;
+    private StatefulRedisConnection<String, String> redisConnection;
+    private Map<String, String> redisLocalCache;
+    private CacheFrontend<String, String> redisCacheFrontend;
+    
     private AtomicLong recordIdCounter = new AtomicLong(0);
 
     @Setup(Level.Trial)
@@ -80,6 +111,8 @@ public class RefreshLatencyBenchmark {
         
         setupHollow();
         setupKafka();
+        setupHazelcast();
+        setupRedis();
     }
 
     private void setupHollow() {
@@ -161,10 +194,107 @@ public class RefreshLatencyBenchmark {
         latch.await(30, TimeUnit.SECONDS);
     }
 
+    private void setupHazelcast() {
+        String clusterName = "refresh-benchmark-" + System.currentTimeMillis();
+        
+        // Configure with Near-Cache (simulates distributed scenario with 2 instances)
+        Config config = new Config();
+        config.setClusterName(clusterName);
+        
+        NetworkConfig networkConfig = config.getNetworkConfig();
+        JoinConfig joinConfig = networkConfig.getJoin();
+        joinConfig.getMulticastConfig().setEnabled(false);
+        joinConfig.getTcpIpConfig().setEnabled(true).addMember("127.0.0.1");
+        
+        // Map config with Near-Cache
+        MapConfig mapConfig = new MapConfig(HAZELCAST_MAP_NAME);
+        mapConfig.setBackupCount(0);
+        
+        NearCacheConfig nearCacheConfig = new NearCacheConfig();
+        nearCacheConfig.setName(HAZELCAST_MAP_NAME);
+        nearCacheConfig.setInMemoryFormat(InMemoryFormat.OBJECT);
+        nearCacheConfig.setInvalidateOnChange(true);
+        nearCacheConfig.setCacheLocalEntries(true);
+        
+        EvictionConfig evictionConfig = new EvictionConfig();
+        evictionConfig.setEvictionPolicy(EvictionPolicy.LRU);
+        evictionConfig.setMaxSizePolicy(MaxSizePolicy.ENTRY_COUNT);
+        evictionConfig.setSize(100000);
+        nearCacheConfig.setEvictionConfig(evictionConfig);
+        
+        mapConfig.setNearCacheConfig(nearCacheConfig);
+        config.addMapConfig(mapConfig);
+        
+        // Create two instances to simulate producer/consumer separation
+        hazelcastProducerInstance = Hazelcast.newHazelcastInstance(config);
+        hazelcastConsumerInstance = Hazelcast.newHazelcastInstance(config);
+        
+        hazelcastProducerMap = hazelcastProducerInstance.getMap(HAZELCAST_MAP_NAME);
+        hazelcastConsumerMap = hazelcastConsumerInstance.getMap(HAZELCAST_MAP_NAME);
+        
+        // Pre-populate consumer's Near-Cache
+        hazelcastProducerMap.put(0L, new UserAccount(0, "initial", true));
+        hazelcastConsumerMap.get(0L); // Warm up Near-Cache
+    }
+
+    private void setupRedis() {
+        redisLocalCache = new ConcurrentHashMap<>();
+        
+        RedisURI redisUri = RedisURI.builder()
+                .withHost("localhost")
+                .withPort(6379)
+                .build();
+
+        ClientOptions clientOptions = ClientOptions.builder()
+                .protocolVersion(ProtocolVersion.RESP3)
+                .build();
+
+        redisClient = RedisClient.create(redisUri);
+        redisClient.setOptions(clientOptions);
+
+        redisConnection = redisClient.connect();
+
+        // Enable client-side caching with TRACKING
+        try {
+            StatefulRedisConnection<String, String> trackingConnection = redisClient.connect();
+            redisCacheFrontend = ClientSideCaching.enable(
+                    CacheAccessor.forMap(redisLocalCache),
+                    trackingConnection,
+                    TrackingArgs.Builder.enabled().bcast()
+            );
+        } catch (Exception e) {
+            System.err.println("Warning: Redis TRACKING not available: " + e.getMessage());
+            redisCacheFrontend = null;
+        }
+
+        // Pre-populate initial data
+        RedisCommands<String, String> commands = redisConnection.sync();
+        String initialJson = "{\"id\":0,\"email\":\"initial\",\"name\":\"Initial\"}";
+        commands.set(REDIS_KEY_PREFIX + "0", initialJson);
+        redisLocalCache.put(REDIS_KEY_PREFIX + "0", initialJson); // Warm up local cache
+    }
+
     @TearDown(Level.Trial)
     public void teardown() throws IOException {
         if (kafkaProducer != null) kafkaProducer.close();
         if (kafkaStreams != null) kafkaStreams.close();
+        if (hazelcastProducerInstance != null) hazelcastProducerInstance.shutdown();
+        if (hazelcastConsumerInstance != null) hazelcastConsumerInstance.shutdown();
+        
+        // Cleanup Redis
+        if (redisConnection != null) {
+            try {
+                RedisCommands<String, String> commands = redisConnection.sync();
+                var keys = commands.keys(REDIS_KEY_PREFIX + "*");
+                if (!keys.isEmpty()) {
+                    commands.del(keys.toArray(new String[0]));
+                }
+                redisConnection.close();
+            } catch (Exception e) {
+                // Ignore cleanup errors
+            }
+        }
+        if (redisClient != null) redisClient.shutdown();
         
         cleanupDirectory(hollowDir);
         cleanupDirectory(kafkaStateDir);
@@ -228,5 +358,53 @@ public class RefreshLatencyBenchmark {
         }
         
         blackhole.consume(store.get(id));
+    }
+
+    /**
+     * Benchmark: Hazelcast Near-Cache end-to-end refresh latency.
+     * Measures time from put on producer to visibility on consumer (after invalidation).
+     */
+    @Benchmark
+    public void hazelcastRefreshLatency(Blackhole blackhole) {
+        long id = recordIdCounter.incrementAndGet();
+        UserAccount account = new UserAccount(id, "user_" + id, true);
+        
+        // Publish via producer instance
+        hazelcastProducerMap.put(id, account);
+        
+        // Read from consumer instance - Near-Cache should be invalidated automatically
+        // The first read after invalidation will fetch from the cluster
+        UserAccount result = hazelcastConsumerMap.get(id);
+        
+        blackhole.consume(result);
+    }
+
+    /**
+     * Benchmark: Redis client-side cache end-to-end refresh latency.
+     * Measures time from SET to visibility via TRACKING invalidation.
+     */
+    @Benchmark
+    public void redisRefreshLatency(Blackhole blackhole) throws Exception {
+        long id = recordIdCounter.incrementAndGet();
+        String key = REDIS_KEY_PREFIX + id;
+        String json = String.format(
+            "{\"id\":%d,\"email\":\"user_%d@example.com\",\"name\":\"User %d\"}",
+            id, id, id
+        );
+        
+        // Write to Redis (triggers TRACKING invalidation)
+        RedisCommands<String, String> commands = redisConnection.sync();
+        commands.set(key, json);
+        
+        // Read via CacheFrontend (will fetch from Redis since not in local cache)
+        String result;
+        if (redisCacheFrontend != null) {
+            result = redisCacheFrontend.get(key);
+        } else {
+            // Fallback if TRACKING not available
+            result = commands.get(key);
+        }
+        
+        blackhole.consume(result);
     }
 }

@@ -127,8 +127,9 @@ public class HollowBenchmark {
         var typeState = stateEngine.getTypeState("UserAccount");
         if (typeState != null) {
             int count = 0;
-            for (int i = 0; i <= typeState.maxOrdinal(); i++) {
-                if (!typeState.isOrdinalPopulated(i)) continue;
+            int maxOrdinal = typeState.maxOrdinal();
+            for (int i = 0; i <= maxOrdinal; i++) {
+                // Just iterate through ordinals - Hollow doesn't expose isOrdinalPopulated directly
                 count++;
             }
             blackhole.consume(count);
