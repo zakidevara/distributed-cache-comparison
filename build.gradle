@@ -6,8 +6,8 @@ plugins {
 }
 
 group = 'com.devara'
-version = '0.0.1-SNAPSHOT'
-description = 'Demo of Netflix hollow usage'
+version = '1.0.0'
+description = 'Comparison of distributed caching strategies: Netflix Hollow, Kafka KTables, Hazelcast Near-Cache, and Redis Client-Side Caching'
 
 java {
 	toolchain {

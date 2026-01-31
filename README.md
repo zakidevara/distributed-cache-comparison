@@ -1,177 +1,166 @@
-# Netflix Hollow Demo Application
+# Distributed Cache Comparison
 
-A Spring Boot application demonstrating Netflix Hollow - an in-memory immutable dataset caching library.
+A Spring Boot application comparing four distributed caching strategies with automatic refresh/invalidation:
 
-## What is Netflix Hollow?
+| Strategy | Type | Refresh Mechanism | Best For |
+|----------|------|-------------------|----------|
+| **Netflix Hollow** | Immutable dataset | File-based snapshots + announcements | Read-heavy reference data |
+| **Kafka KTables** | Streaming state store | Continuous changelog consumption | Event-driven pipelines |
+| **Hazelcast Near-Cache** | Distributed + local cache | Automatic invalidation events | Ultra-low latency lookups |
+| **Redis Client-Side** | Key-value + local cache | TRACKING-based invalidation | Simple caching, broad ecosystem |
 
-[Netflix Hollow](https://hollow.how) is a Java library and toolkit for disseminating in-memory datasets from a single producer to many consumers for high-performance read-only access. It provides:
+## Quick Start
 
-- **Efficient Memory Usage**: Data is stored in a compact binary format
-- **Delta Updates**: Only changes are transmitted when data is updated
-- **Time Travel**: Access historical versions of data
-- **Type Safety**: Strongly typed data access with generated APIs
+```powershell
+# Choose a caching strategy and run:
+
+# Netflix Hollow (filesystem-based)
+./gradlew bootRun --args='--spring.profiles.active=filesystem'
+
+# Kafka KTables (requires Kafka)
+docker-compose -f docker-compose-kafka.yml up -d
+./gradlew bootRun --args='--spring.profiles.active=kafka'
+
+# Hazelcast Near-Cache (embedded)
+./gradlew bootRun --args='--spring.profiles.active=hazelcast'
+
+# Redis Client-Side (requires Redis)
+docker-compose -f docker-compose-redis.yml up -d
+./gradlew bootRun --args='--spring.profiles.active=redis'
+```
 
 ## Project Structure
 
 ```
 src/main/java/com/devara/hollow/
-├── HollowApplication.java       # Spring Boot main application
-├── HollowProducerService.java   # Produces/publishes data to Hollow
-├── HollowConsumerService.java   # Consumes/reads data from Hollow
-├── HollowController.java        # REST API endpoints
+├── HollowApplication.java           # Spring Boot main application
+├── HollowController.java            # Hollow REST API
+├── KafkaController.java             # Kafka REST API
+├── HazelcastController.java         # Hazelcast REST API
+├── RedisController.java             # Redis REST API
 ├── config/
-│   └── HollowUIConfiguration.java  # Configuration class
+│   ├── HollowUIConfiguration.java   # Hollow config
+│   ├── KafkaConfig.java             # Kafka Streams config
+│   ├── HazelcastConfig.java         # Hazelcast Near-Cache config
+│   └── RedisConfig.java             # Redis TRACKING config
+├── service/
+│   ├── HollowProducerService.java   # Hollow producer
+│   ├── HollowConsumerService.java   # Hollow consumer
+│   ├── kafka/                       # Kafka producer/consumer
+│   ├── hazelcast/                   # Hazelcast producer/consumer
+│   └── redis/                       # Redis producer/consumer
 └── model/
-    └── UserAccount.java         # Sample data model
+    └── UserAccount.java             # Sample data model
 ```
 
-## How It Works
+## Documentation
 
-### 1. Producer
+| Document | Description |
+|----------|-------------|
+| [COMPARISON-README.md](COMPARISON-README.md) | Detailed comparison of all four approaches |
+| [BENCHMARK-README.md](BENCHMARK-README.md) | JMH benchmarking guide |
+| [KAFKA-README.md](KAFKA-README.md) | Kafka KTable implementation details |
 
-The `HollowProducerService` is responsible for publishing data to Hollow:
+## Architecture Overview
 
-- Uses a filesystem-based publisher to store data snapshots in `./hollow-repo`
-- Runs "cycles" where all current data is added to Hollow
-- Each cycle creates a new version with an associated timestamp
-
-### 2. Consumer
-
-The `HollowConsumerService` reads data from Hollow:
-
-- Uses a filesystem-based blob retriever to read data from `./hollow-repo`
-- Watches for announcements of new data versions
-- Can be refreshed to get the latest data
-
-### 3. Data Flow
-
+### 1. Netflix Hollow
 ```
-┌──────────────┐    publish    ┌──────────────────┐    read     ┌──────────────┐
-│   Producer   │ ──────────► │  hollow-repo/    │ ──────────► │   Consumer   │
-│   Service    │              │  (filesystem)    │             │   Service    │
-└──────────────┘              └──────────────────┘             └──────────────┘
+Producer → Snapshot/Delta Files → Blob Storage → Announcement → Consumer Refresh
+```
+- Full dataset published each cycle
+- Delta updates for efficiency
+- Time travel capability
+
+### 2. Kafka KTables
+```
+Producer → Kafka Topic (compacted) → Kafka Streams → KTable (RocksDB) → Query
+```
+- Real-time streaming updates
+- Automatic state materialization
+- Partition-based scaling
+
+### 3. Hazelcast Near-Cache
+```
+Producer → Distributed IMap → Invalidation Event → Near-Cache Clear → Fresh Fetch
+```
+- Sub-microsecond local reads
+- Automatic invalidation on updates
+- No manual refresh needed
+
+### 4. Redis Client-Side Caching
+```
+Producer → Redis SET → TRACKING Invalidation → Local Cache Clear → Fresh Fetch
+```
+- RESP3 protocol with TRACKING
+- ConcurrentHashMap local cache
+- Broad ecosystem compatibility
+
+## REST API Endpoints
+
+Each caching strategy exposes similar endpoints:
+
+| Endpoint Pattern | Method | Description |
+|------------------|--------|-------------|
+| `/api/{strategy}/produce` | POST | Write data |
+| `/api/{strategy}/produce/sample` | POST | Generate sample data |
+| `/api/{strategy}/consume/{id}` | GET | Read by ID |
+| `/api/{strategy}/consume/all` | GET | Read all records |
+| `/api/{strategy}/consume/stats` | GET | Cache statistics |
+
+Where `{strategy}` is one of: `hollow`, `kafka`, `hazelcast`, `redis`
+
+## Benchmarks
+
+Run JMH benchmarks to compare performance:
+
+```powershell
+# Start required services
+docker-compose -f docker-compose-kafka.yml up -d
+docker-compose -f docker-compose-redis.yml up -d
+
+# Run all benchmarks
+./gradlew jmh
+
+# Run refresh latency comparison
+./gradlew jmh -Pjmh.includes='RefreshLatencyBenchmark'
+```
+
+### Expected Results
+
+| Metric | Hollow | Kafka | Hazelcast | Redis |
+|--------|--------|-------|-----------|-------|
+| **Read Latency** | ~100ns | ~1ms | ~150ns | ~80ns |
+| **Refresh Latency** | ~1-5ms | ~50-100ms | ~0.1-1ms | ~0.1-0.5ms |
+| **Write Latency** | ~15ms (batch) | ~5ms | ~1ms | ~0.5ms |
+
+## Demo Scripts
+
+Interactive PowerShell demos for each strategy:
+
+```powershell
+./demo-auto-refresh.ps1           # Hollow
+./demo-kafka-auto-refresh.ps1     # Kafka
+./demo-hazelcast-auto-refresh.ps1 # Hazelcast
+./demo-redis-auto-refresh.ps1     # Redis
 ```
 
 ## Prerequisites
 
-- Java 21 or higher
-- Gradle (wrapper included)
+- **Java 21+**
+- **Gradle** (wrapper included)
+- **Docker** (for Kafka and Redis)
 
-## Running the Application
+## Configuration Profiles
 
-1. **Build the project**:
-   ```bash
-   ./gradlew build
-   ```
-
-2. **Run the application**:
-   ```bash
-   ./gradlew bootRun
-   ```
-
-   The application starts on port **8080**.
-
-## REST API Endpoints
-
-### Check Status
-```http
-GET http://localhost:8080/api/hollow/status
-```
-
-Returns the current state of the Hollow consumer:
-```json
-{
-  "currentVersion": 20260131143138001,
-  "hasData": true,
-  "types": ["String", "UserAccount"]
-}
-```
-
-### Publish Data
-```http
-POST http://localhost:8080/api/hollow/publish
-Content-Type: application/json
-```
-
-**Without body** - publishes sample data:
-```json
-{
-  "message": "Data published successfully",
-  "recordCount": 5
-}
-```
-
-**With custom data**:
-```json
-[
-  {"id": 1, "username": "alice", "active": true},
-  {"id": 2, "username": "bob", "active": false}
-]
-```
-
-### Refresh Consumer
-```http
-POST http://localhost:8080/api/hollow/refresh
-```
-
-Refreshes the consumer to pick up the latest published data:
-```json
-{
-  "message": "Consumer refreshed successfully",
-  "currentVersion": 20260131143138001
-}
-```
-
-### Browse Data
-```http
-GET http://localhost:8080/api/hollow/data
-GET http://localhost:8080/api/hollow/data?type=UserAccount
-```
-
-Returns all data stored in Hollow:
-```json
-{
-  "currentVersion": 20260131143138001,
-  "hasData": true,
-  "data": {
-    "UserAccount": [
-      {"ordinal": 0, "id": 1, "username": "alice", "active": true},
-      {"ordinal": 1, "id": 2, "username": "bob", "active": true}
-    ]
-  }
-}
-```
-
-## Quick Start Example
-
-1. Start the application:
-   ```bash
-   ./gradlew bootRun
-   ```
-
-2. Check initial status (no data):
-   ```bash
-   curl http://localhost:8080/api/hollow/status
-   ```
-
-3. Publish sample data:
-   ```bash
-   curl -X POST http://localhost:8080/api/hollow/publish
-   ```
-
-4. Refresh the consumer:
-   ```bash
-   curl -X POST http://localhost:8080/api/hollow/refresh
-   ```
-
-5. Browse the data:
-   ```bash
-   curl http://localhost:8080/api/hollow/data
-   ```
+| Profile | Config File | External Dependencies |
+|---------|-------------|----------------------|
+| `filesystem` | `application-filesystem.properties` | None |
+| `s3` | `application-s3.properties` | AWS S3 |
+| `kafka` | `application-kafka.properties` | Kafka broker |
+| `hazelcast` | `application-hazelcast.properties` | None (embedded) |
+| `redis` | `application-redis.properties` | Redis server |
 
 ## Data Model
-
-The `UserAccount` model demonstrates Hollow's features:
 
 ```java
 @HollowPrimaryKey(fields="id")
@@ -182,39 +171,34 @@ public class UserAccount {
 }
 ```
 
-- `@HollowPrimaryKey` - Designates `id` as the primary key for deduplication
+## When to Use Each Strategy
 
-## Data Storage
+| Use Case | Recommended |
+|----------|-------------|
+| Large read-heavy reference data | **Hollow** |
+| Real-time event streaming | **Kafka KTables** |
+| Ultra-low latency requirements | **Hazelcast** |
+| Simple caching, existing Redis | **Redis** |
+| Time travel / versioning needed | **Hollow** |
+| Already have Kafka infrastructure | **Kafka KTables** |
 
-Data is stored in the `./hollow-repo` directory:
-- `snapshot-*` files contain full data snapshots
-- `delta-*` files contain incremental changes
-- `announced.version` tracks the latest published version
-
-## Key Concepts
-
-### Ordinals
-Each record in Hollow has an ordinal (index) that identifies it within a type. Ordinals are stable across refreshes as long as the data doesn't change.
-
-### Versions
-Each publish cycle creates a new version. The version number is typically a timestamp. Consumers can refresh to get the latest version.
-
-### Types
-Hollow automatically creates types based on your data model classes. Primitive wrappers like `String` become their own types.
-
-## Technologies Used
+## Technologies
 
 - **Spring Boot 4.0** - Application framework
-- **Netflix Hollow 7.14.x** - In-memory dataset library
-- **Lombok** - Reduces boilerplate code
-- **Gradle** - Build tool
+- **Netflix Hollow 7.14** - Immutable dataset library
+- **Apache Kafka 3.7** - Streaming platform
+- **Hazelcast 5.4** - In-memory data grid
+- **Redis 7.2** - Key-value store with TRACKING
+- **Lettuce 6.3** - Redis client with RESP3
+- **JMH 0.7** - Microbenchmarking
 
 ## License
 
-This project is for demonstration purposes.
+This project is for demonstration and comparison purposes.
 
 ## Resources
 
-- [Netflix Hollow Documentation](https://hollow.how)
-- [Hollow GitHub Repository](https://github.com/Netflix/hollow)
-- [Spring Boot Documentation](https://spring.io/projects/spring-boot)
+- [Netflix Hollow](https://hollow.how)
+- [Apache Kafka Streams](https://kafka.apache.org/documentation/streams/)
+- [Hazelcast Near-Cache](https://docs.hazelcast.com/hazelcast/latest/performance/near-cache)
+- [Redis Client-Side Caching](https://redis.io/docs/manual/client-side-caching/)
