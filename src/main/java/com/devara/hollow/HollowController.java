@@ -1,6 +1,8 @@
 package com.devara.hollow;
 
 import com.devara.hollow.model.UserAccount;
+import com.devara.hollow.service.HollowConsumerService;
+import com.devara.hollow.service.HollowProducerService;
 import com.netflix.hollow.core.read.engine.HollowReadStateEngine;
 import com.netflix.hollow.core.read.engine.HollowTypeReadState;
 import com.netflix.hollow.core.schema.HollowObjectSchema;

@@ -35,6 +35,10 @@ dependencies {
     
     // Netflix Hollow Core
     implementation 'com.netflix.hollow:hollow:7.14.23'
+    
+    // AWS SDK for S3 (optional - only needed when using S3 profile)
+    implementation platform('software.amazon.awssdk:bom:2.29.51')
+    implementation 'software.amazon.awssdk:s3'
 }
 
 tasks.named('test') {
